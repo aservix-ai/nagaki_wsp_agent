@@ -1,0 +1,5 @@
+- Implementar busqueda semantica utilizando Superlinked.
+- Añadir capacidad de enviar imagenes
+- Capacidad de reconocer zonas y lugares cercanos a direcciones, barrios, etc.
+- Enviar mensaje a encargado al alcanzar estado cualificado. (Lo hizó José)
+- Añadir a la base de datos: metros cuadrados, numero de habitaciones, numero de dormitorios, numero de baños, numero de terrazas, numero de garajes, piscina (atributos adicionales)

@@ -1,0 +1,12 @@
+.env 
+.env.example
+.venv/
+.DS_Store
+.langgraph_api/
+chroma_db/
+Links
+.langgraph_api
+analisis_requerimientos.md
+nagaki_http.md
+walkthrough.md
+walkthrough.md.resolved

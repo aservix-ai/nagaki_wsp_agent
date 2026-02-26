@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nagaki-agent"
+version = "0.1.0"
+description = "Agente IA para Grupo Nagaki - Asistente inmobiliario Laura"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "langgraph",
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-text-splitters>=0.3.0",
+    "langchain-chroma>=0.1.0",
+    "chromadb>=0.5.0",
+    "tiktoken>=0.8.0",
+    "pydantic>=2.0.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
+    "psycopg[binary]>=3.1.0",
+    "python-dotenv>=1.0.0",
+    "supabase>=2.25.1",
+    "jinja2>=3.1.6",
+    "postgrest>=2.0.0",
+    "gotrue>=2.0.0",
+    "realtime>=2.0.0",
+    "storage3>=2.0.0",
+    "supabase-functions>=2.0.0",
+    "langgraph-cli>=0.4.7",
+    "requests>=2.31.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",
+    # New dependencies for improvements
+    "redis>=5.0.0",  # Message buffering
+    "symspellpy>=6.7.0",  # Spell correction
+    # "superlinked>=10.0.0",  # Semantic search - Comentado temporalmente (requiere CUDA pesado)
+    "emoji>=2.15.0",
+    "pytz>=2025.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+    "langgraph-cli[inmem]>=0.2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
