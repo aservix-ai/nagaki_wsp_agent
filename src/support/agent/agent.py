@@ -12,7 +12,6 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import ToolNode
 from langchain_core.messages import HumanMessage
 
 logger = logging.getLogger(__name__)
@@ -23,14 +22,7 @@ from src.support.agent.routes.verification_route import verification_router
 from src.support.agent.nodes.conversation.node import (
     conversation_node,
     update_points_node,
-    should_continue,
     route_after_update_points,
-)
-from src.support.agent.nodes.conversation.tools import (
-    buscar_info_viviendas,
-    consultar_inmuebles,
-    notificar_encargado,
-    finalizar_conversacion,
 )
 from src.support.agent.nodes.classify_user.node import (
     classify_user_node,
@@ -140,24 +132,18 @@ class Agent:
     def make_graph(self, checkpointer=None):
         """
         Construye el grafo de flujo del agente.
+        React Agent maneja las herramientas internamente.
         """
         workflow = StateGraph(AgentState)
         
-        # Agregar nodos
         workflow.add_node("verification", verification_node)
         workflow.add_node("conversation", conversation_node)
         workflow.add_node("classify_user", classify_user_node)
         workflow.add_node("qualified", qualified_node)
-        
-        # Herramientas
-        tools = [buscar_info_viviendas, consultar_inmuebles, notificar_encargado, finalizar_conversacion]
-        workflow.add_node("tools", ToolNode(tools))
         workflow.add_node("update_points", update_points_node)
         
-        # Configurar punto de entrada
         workflow.set_entry_point("verification")
         
-        # Enrutamiento desde verification
         workflow.add_conditional_edges(
             "verification",
             verification_router,
@@ -168,20 +154,8 @@ class Agent:
             }
         )
         
-        # Flujo conversation -> tools
-        workflow.add_conditional_edges(
-            "conversation",
-            should_continue,
-            {
-                "tools": "tools",
-                "end": "update_points",
-            }
-        )
+        workflow.add_edge("conversation", "update_points")
         
-        # Volver de tools a conversation
-        workflow.add_edge("tools", "conversation")
-        
-        # Evaluar después de update_points
         workflow.add_conditional_edges(
             "update_points",
             route_after_update_points,
@@ -191,22 +165,18 @@ class Agent:
             }
         )
         
-        # Flujo classify_user
         workflow.add_conditional_edges(
             "classify_user",
             should_continue_classify,
             {
                 "end": END,
-                "tools": "tools",
             }
         )
         
-        # Flujo qualified
         workflow.add_conditional_edges(
             "qualified",
             should_continue_qualified,
             {
-                "tools": "tools",
                 "end": END,
             }
         )

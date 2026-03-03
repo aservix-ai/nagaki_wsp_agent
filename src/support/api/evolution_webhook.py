@@ -34,7 +34,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from src.support.agent import Agent
-from src.support.agent.background_tasks import update_points_background, qualify_response_background
+# Background tasks de calificación deshabilitados temporalmente
+# from src.support.agent.background_tasks import update_points_background, qualify_response_background
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 # Importar nuevas utilidades
@@ -212,9 +213,6 @@ async def process_whatsapp_task(
                  await set_whatsapp_presence(phone_number, "unavailable") 
                  return
 
-            points_before = prev_state.get("points", 0)
-            is_interested = prev_state.get("interested", False)
-            
             # 3. Asegurar grafo async listo
             await agent._ensure_async_setup()
             
@@ -403,39 +401,6 @@ async def process_whatsapp_task(
                 for img_data in pending_images:
                     await send_whatsapp_image(phone_number, img_data["base64"], img_data.get("caption"))
             
-            # 6. Lanzar tareas de calificación/puntos (en background también)
-            final_tool_calls = []
-            # Usar new_messages en lugar de messages (todo el historial) para solo recalificar lo nuevo
-            # Nota: Si new_messages está vacio (caso raro), no pasa nada
-            msgs_to_check = new_messages if 'new_messages' in locals() and new_messages else result.get("messages", [])
-            
-            for msg in reversed(msgs_to_check):
-                if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        if tc.get("name") == "calificar_respuesta_usuario":
-                            args = tc.get("args", {})
-                            if args.get("respuesta_usuario"):
-                                final_tool_calls.append(tc)
-                    break
-            
-            if final_tool_calls:
-                background_tasks.add_task(
-                    qualify_response_background,
-                    tool_calls=final_tool_calls,
-                    thread_id=phone_number,
-                    agent=agent,
-                    current_points=points_before,
-                )
-            else:
-                background_tasks.add_task(
-                    update_points_background,
-                    user_input=normalized_text,
-                    thread_id=phone_number,
-                    agent=agent,
-                    current_points=points_before,
-                    is_classify_context=is_interested,
-                )
-                
         except Exception as e:
             logger.error(f"❌ [Task] Error en tarea de procesamiento: {e}", exc_info=True)
             await send_whatsapp_message(
@@ -1259,6 +1224,7 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
         
         # Verificar tipo de evento
         event_type = body.get("event", "")
+        logger.info(f"📨 Webhook recibido - Evento: {event_type}")
         
         # Si es un evento de presencia (composing/typing)
         if event_type == "presence.update":
@@ -1276,7 +1242,7 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
 
         # Solo procesar mensajes entrantes (upsert)
         if event_type != "messages.upsert":
-            logger.debug(f"📭 Evento ignorado: {event_type}")
+            logger.info(f"📭 Evento ignorado (no es messages.upsert): {event_type}")
             return JSONResponse(content={"status": "ignored", "event": event_type})
         
         data = body.get("data", {})
@@ -1473,11 +1439,6 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
         
         # Verificar DEDUPLICACIÓN DE NUEVO si venimos de un buffer wait largo
         # (Aunque el cache ya lo hizo, es bueno asegurarse que no estamos procesando lo mismo)
-        
-        # Recuperar estado previo antes de lanzar la tarea (para tener coherencia)
-        prev_state = await get_previous_state(phone_number)
-        points_before = prev_state.get("points", 0)
-        is_interested = prev_state.get("interested", False)
         
         # Lanzar el procesamiento real en SEGUNDO PLANO
         # La tarea recuperará el estado fresco dentro del lock

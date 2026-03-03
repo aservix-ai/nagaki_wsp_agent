@@ -4,6 +4,12 @@ from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
 
 
+class QualificationThreshold:
+    """Placeholder - Sistema de calificación deshabilitado temporalmente."""
+    INTERESTED = 4
+    QUALIFIED = 7
+
+
 class AgentState(TypedDict):
     # Historial de conversación
     messages: Annotated[list[BaseMessage], add_messages]
