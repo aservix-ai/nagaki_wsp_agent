@@ -2,7 +2,6 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from src.support.agent.nodes.conversation.rag import get_rag_system
 import json
 import os
 import httpx
@@ -176,19 +175,11 @@ def buscar_info_viviendas(query: str) -> str:
     Returns:
         Información encontrada en la knowledge base
     """
-    rag = get_rag_system()
-    results = rag.search(query, k=3)
-    
-    if not results:
-        return f"No se encontró información sobre '{query}'."
-    
-    response_parts = []
-    for i, doc in enumerate(results, 1):
-        source = doc.metadata.get("source", "Documento")
-        content = doc.page_content.strip()
-        response_parts.append(f"[{i}] {source}:\n{content}\n")
-    
-    return "\n".join(response_parts)
+    _ = query
+    return (
+        "La base documental de viviendas no está disponible ahora mismo. "
+        "Puedo ayudarte con búsqueda de inmuebles concretos por zona, precio y tipo."
+    )
 
 
 # ============================================================

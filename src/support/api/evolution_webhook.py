@@ -21,6 +21,7 @@ FLUJO:
 import json
 import logging
 import os
+import re
 import sys
 import asyncio
 import random
@@ -37,10 +38,15 @@ from src.support.agent import Agent
 # Background tasks de calificación deshabilitados temporalmente
 # from src.support.agent.background_tasks import update_points_background, qualify_response_background
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from src.support.agent.qualification import (
+    get_default_snapshot,
+    load_qualification_snapshot,
+    publish_qualification_event,
+)
+from src.support.agent.qualification.store import next_turn_id
 
 # Importar nuevas utilidades
 from src.support.utils.whatsapp_formatter import format_for_whatsapp
-from src.support.utils.text_normalizer import normalize_text
 from src.support.utils.text_normalizer import normalize_text
 from src.support.utils.audio import download_audio, transcribe_audio, generate_voice, save_base64_audio
 from src.support.utils.delay_manager import ThinkingDelayManager
@@ -106,6 +112,7 @@ async def process_whatsapp_task(
     normalized_text: str,
     agent: Agent,
     background_tasks: BackgroundTasks,
+    thread_id: Optional[str] = None,
     audio_url: Optional[str] = None,
     audio_base64: Optional[str] = None
 ):
@@ -113,6 +120,7 @@ async def process_whatsapp_task(
     Tarea que se ejecuta en segundo plano para procesar el mensaje con el agente
     y enviar la respuesta, evitando bloquear el webhook y causar timeouts.
     """
+    thread_id = thread_id or canonical_thread_id(phone_number)
     user_lock = await user_locks.get_lock(phone_number)
     
     async with user_lock:
@@ -203,26 +211,52 @@ async def process_whatsapp_task(
                 logger.warning(f"🛑 [Task] Cancelada por NUEVO mensaje de usuario (CP2) - {phone_number[:6]}***")
                 return
             
-            # 2. Re-obtener estado fresco DESPUÉS del lock y delay
-            # Esto evita usar estados obsoletos si hubo mensajes previos procesándose
-            prev_state = await get_previous_state(phone_number)
-            
-            # CHECK: ¿Conversación cerrada?
-            if prev_state.get("conversation_closed", False):
-                 logger.info(f"🛑 [Task] Conversación cerrada previamente para {phone_number}. Ignorando mensaje.")
-                 await set_whatsapp_presence(phone_number, "unavailable") 
-                 return
-
-            # 3. Asegurar grafo async listo
+            # 2. Asegurar grafo async listo
             await agent._ensure_async_setup()
+
+            # 3. Re-obtener estado fresco DESPUÉS del lock y delay
+            # Esto evita usar estados obsoletos si hubo mensajes previos procesándose
+            prev_state = await get_previous_state(thread_id)
+
+            qualification_snapshot = await load_qualification_snapshot(thread_id)
+            if qualification_snapshot is None:
+                qualification_snapshot = get_default_snapshot()
+
+            prev_snapshot = prev_state.get("qualification_snapshot")
+            if isinstance(prev_snapshot, dict):
+                qualification_snapshot = prev_snapshot
             
             # 4. Construir estado inicial y configurar thread
             messages_before = prev_state.get("messages", [])
-            initial_state = build_initial_state(normalized_text, prev_state, thread_id=phone_number)
-            config = {"configurable": {"thread_id": phone_number}}
+            initial_state = build_initial_state(
+                normalized_text,
+                prev_state,
+                qualification_snapshot=qualification_snapshot,
+            )
+            config = {"configurable": {"thread_id": thread_id}}
+
+            turn_id = await next_turn_id(thread_id)
+            if turn_id > 0:
+                publish_qualification_event(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    user_text=normalized_text,
+                    source="whatsapp",
+                    conversation_context=build_conversation_context(messages_before, normalized_text),
+                )
+            else:
+                logger.warning(
+                    "Qualification event not published for %s because turn_id=%s",
+                    thread_id,
+                    turn_id,
+                )
             
             # 5. Invocar el agente
-            logger.info(f"🤖 [Task] Invocando agente para {phone_number[:6]}***...")
+            logger.info(
+                "🤖 [Task] Invocando agente para %s*** thread=%s",
+                phone_number[:6],
+                thread_id,
+            )
             result = await agent.async_graph.ainvoke(initial_state, config=config)
             
             messages_all = result.get("messages", [])
@@ -542,39 +576,46 @@ async def get_previous_state(thread_id: str) -> Dict[str, Any]:
     try:
         state = await agent.async_graph.aget_state(config)
         if state and state.values:
-            logger.debug(f"📊 Estado previo recuperado para {thread_id}: points={state.values.get('points', 0)}")
+            snapshot = state.values.get("qualification_snapshot") or {}
+            logger.debug(
+                "📊 Estado previo recuperado para %s: stage=%s",
+                thread_id,
+                snapshot.get("qualification_stage", "new"),
+            )
             return state.values
     except Exception as e:
         logger.debug(f"No se encontró estado previo para {thread_id}: {e}")
     return {}
 
 
-def build_initial_state(user_input: str, prev_state: Dict[str, Any], thread_id: str = None) -> Dict[str, Any]:
+def build_initial_state(
+    user_input: str,
+    prev_state: Dict[str, Any],
+    qualification_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """
     Construye el estado inicial preservando datos del estado previo.
     
     Args:
         user_input: Mensaje del usuario
         prev_state: Estado previo del checkpointer
-        thread_id: ID del hilo de conversación (número de teléfono)
+        qualification_snapshot: Snapshot actual de calificación
         
     Returns:
         dict: Estado inicial con datos preservados
     """
-    # Si no hay estado previo (o está vacío), es la primera vez
-    is_new_customer = not bool(prev_state)
-    
+    snapshot = qualification_snapshot if isinstance(qualification_snapshot, dict) else get_default_snapshot()
     return {
         "messages": [HumanMessage(content=user_input)],
         "input": user_input,
         "is_customer": prev_state.get("is_customer", False),
-        "points": prev_state.get("points", 0),
-        "qualified": prev_state.get("qualified", False),
-        "interested": prev_state.get("interested", False),
-        "property_type": prev_state.get("property_type", "unknown"),
-        "is_new_customer": is_new_customer,
-        "thread_id": thread_id,  # Agregado para acceso en nodos
-        "conversation_closed": prev_state.get("conversation_closed", False),
+        "qualification_snapshot": snapshot,
+        "interested": snapshot.get("interested", prev_state.get("interested", False)),
+        "qualified": snapshot.get("qualified", prev_state.get("qualified", False)),
+        "qualification_stage": snapshot.get(
+            "qualification_stage",
+            prev_state.get("qualification_stage", "new"),
+        ),
     }
 
 
@@ -596,6 +637,65 @@ def normalize_phone_number(remote_jid: str) -> str:
     # Remover el sufijo @s.whatsapp.net o @g.us (para grupos)
     phone = remote_jid.split("@")[0]
     return phone
+
+
+def canonical_thread_id(phone_number: str) -> str:
+    """Convierte teléfono WhatsApp a thread_id canónico compartible entre bots."""
+    value = phone_number.strip()
+    if value.startswith("00"):
+        value = f"+{value[2:]}"
+    if not value.startswith("+"):
+        value = f"+{value}"
+    digits = re.sub(r"\D", "", value)
+    if not digits:
+        return f"lead:{phone_number}"
+    return f"lead:+{digits}"
+
+
+def _message_text(value: Any) -> str:
+    if isinstance(value, str):
+        return " ".join(value.split()).strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for chunk in value:
+            if isinstance(chunk, str):
+                parts.append(chunk)
+            elif isinstance(chunk, dict):
+                text = chunk.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif hasattr(chunk, "text") and isinstance(chunk.text, str):
+                parts.append(chunk.text)
+        return " ".join(" ".join(parts).split()).strip()
+    return ""
+
+
+def build_conversation_context(
+    previous_messages: list[Any],
+    user_text: str,
+    max_items: int = 60,
+    max_chars: int = 20_000,
+) -> str:
+    """Serializa el contexto reciente para el worker de calificación."""
+    lines: list[str] = []
+    for msg in previous_messages[-max_items:]:
+        role = "assistant"
+        if isinstance(msg, HumanMessage):
+            role = "user"
+        elif isinstance(msg, ToolMessage):
+            role = "tool"
+        text = _message_text(getattr(msg, "content", ""))
+        if text:
+            lines.append(f"{role}: {text}")
+
+    clean_user = " ".join((user_text or "").split()).strip()
+    if clean_user:
+        lines.append(f"user: {clean_user}")
+
+    context = "\n".join(lines)
+    if len(context) > max_chars:
+        context = context[-max_chars:]
+    return context
 
 
 def extract_message_text(data: dict) -> Optional[str]:
@@ -1277,8 +1377,9 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
             logger.debug(f"👥 Mensaje de grupo ignorado: {remote_jid}")
             return JSONResponse(content={"status": "ignored", "reason": "group_message"})
         
-        # Normalizar número de teléfono para usar como thread_id
+        # Normalizar número de teléfono para interacción con Evolution API
         phone_number = normalize_phone_number(remote_jid)
+        thread_id = canonical_thread_id(phone_number)
         
         # Extraer texto del mensaje
         message_text = extract_message_text(data)
@@ -1335,6 +1436,7 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
                     normalized_text="", # Se llenará con la transcripción
                     agent=agent,
                     background_tasks=background_tasks,
+                    thread_id=thread_id,
                     audio_url=audio_url,
                     audio_base64=audio_base64
                 )
@@ -1349,7 +1451,7 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
             return JSONResponse(content={"status": "ignored", "reason": "no_text"})
         
         logger.info(f"📱 WhatsApp de {phone_number[:6]}***: {message_text}")
-        logger.info(f"🔑 Thread ID: {phone_number}")
+        logger.info(f"🔑 Thread ID canónico: {thread_id}")
         
         # ============================================================
         # NORMALIZACIÓN: Corregir ortografía y limpiar texto
@@ -1447,7 +1549,8 @@ async def evolution_webhook(request: Request, background_tasks: BackgroundTasks)
             phone_number=phone_number,
             normalized_text=normalized_text,
             agent=agent,
-            background_tasks=background_tasks
+            background_tasks=background_tasks,
+            thread_id=thread_id,
         )
         
         logger.info(f"🚀 Tarea de procesamiento lanzada para {phone_number[:6]}***. Respondiendo 200 OK.")
@@ -1492,5 +1595,3 @@ if __name__ == "__main__":
     logger.info(f"🚀 Iniciando Evolution API Webhook en {host}:{port}")
     
     uvicorn.run(app, host=host, port=port, log_level="info")
-
-

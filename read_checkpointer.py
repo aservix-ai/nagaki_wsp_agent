@@ -139,23 +139,85 @@ def inspect_thread(conn_string: str, thread_id: str):
         import traceback
         traceback.print_exc()
 
+def delete_thread(conn_string: str, thread_id: str, force: bool = False):
+    """Delete all checkpoint data for a specific thread_id."""
+    print(f"\nPreparing deletion for thread_id: {thread_id}")
+
+    if not force:
+        confirmation = input(
+            "This will permanently delete checkpoint data for this thread. Type 'DELETE' to continue: "
+        ).strip()
+        if confirmation != "DELETE":
+            print("Deletion canceled.")
+            return
+
+    # Order matters to avoid FK issues in deployments without cascading deletes.
+    table_order = ["checkpoint_writes", "checkpoint_blobs", "checkpoints"]
+
+    try:
+        with psycopg.connect(conn_string) as conn:
+            with conn.cursor() as cur:
+                deleted_counts = {}
+
+                for table_name in table_order:
+                    cur.execute(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM information_schema.tables
+                            WHERE table_schema = 'public'
+                              AND table_name = %s
+                        )
+                        """,
+                        (table_name,),
+                    )
+                    exists = cur.fetchone()[0]
+                    if not exists:
+                        deleted_counts[table_name] = 0
+                        continue
+
+                    cur.execute(
+                        f"DELETE FROM {table_name} WHERE thread_id = %s",
+                        (thread_id,),
+                    )
+                    deleted_counts[table_name] = cur.rowcount
+
+            conn.commit()
+
+        total_deleted = sum(deleted_counts.values())
+        print("Deletion complete.")
+        for table_name in table_order:
+            print(f"  - {table_name}: {deleted_counts.get(table_name, 0)} rows deleted")
+        print(f"Total rows deleted: {total_deleted}")
+
+    except Exception as e:
+        print(f"Error deleting thread data: {e}")
+        import traceback
+        traceback.print_exc()
+
 def main():
     parser = argparse.ArgumentParser(description="Read LangGraph database checkpoints")
     parser.add_argument("--thread", "-t", type=str, help="Thread ID to inspect")
     parser.add_argument("--list", "-l", action="store_true", help="List recent threads")
     parser.add_argument("--limit", type=int, default=20, help="Limit for listing threads")
+    parser.add_argument("--delete-thread", "-d", type=str, help="Thread ID to delete from checkpointer tables")
+    parser.add_argument("--yes", action="store_true", help="Skip delete confirmation prompt")
     
     args = parser.parse_args()
     
     conn_string = get_connection_string()
     
-    if args.thread:
+    if args.delete_thread:
+        delete_thread(conn_string, args.delete_thread, force=args.yes)
+    elif args.thread:
         inspect_thread(conn_string, args.thread)
     else:
         # Default behavior: list threads
         list_threads(conn_string, args.limit)
         print("\nTo inspect a specific thread, run:")
         print("  python read_checkpointer.py --thread <thread_id>")
+        print("\nTo delete a specific thread, run:")
+        print("  python read_checkpointer.py --delete-thread <thread_id>")
 
 if __name__ == "__main__":
     main()

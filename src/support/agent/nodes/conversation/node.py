@@ -1,6 +1,6 @@
 import logging
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_core.messages import SystemMessage, BaseMessage
 from langchain.agents import create_agent
 
 from src.support.agent.state import AgentState
@@ -15,7 +15,6 @@ from src.support.agent.nodes.conversation.tools import (
     finalizar_conversacion,
 )
 from src.support.agent.nodes.conversation.prompt import CONVERSATION_SYSTEM_PROMPT
-from src.support.agent.utils import sanitize_messages
 
 logger = logging.getLogger(__name__)
 
@@ -35,64 +34,48 @@ tools = [
 react_agent = create_agent(llm, tools=tools)
 
 
+def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Filtra mensajes vacíos/corruptos para evitar errores de invocación."""
+    out: list[BaseMessage] = []
+    for msg in messages:
+        if msg is None:
+            continue
+        content = getattr(msg, "content", None)
+        if content is None:
+            continue
+        if isinstance(content, str) and not content.strip():
+            continue
+        out.append(msg)
+    return out
+
+
 def conversation_node(state: AgentState) -> dict:
-    if state.get("conversation_closed", False):
-        logger.info("Conversación cerrada - Ignorando mensaje")
-        return {}
+    messages = _sanitize_messages(state.get("messages", []))
 
-    messages = state.get("messages", [])
-    messages = sanitize_messages(messages)
-    
+    snapshot = state.get("qualification_snapshot") or {}
+    qualified = bool(snapshot.get("qualified", state.get("qualified", False)))
+
     system_instruction = CONVERSATION_SYSTEM_PROMPT
-    if state.get("is_new_customer", False):
-        system_instruction += "\n\nNOTA: Es la PRIMERA VEZ que hablas con este cliente. Preséntate como 'Laura de Grupo Nagaki'."
-
-    if state.get("qualified", False):
-        system_instruction += "\n\nSTATUS: CLIENTE CUALIFICADO (VIP). Este cliente ya fue validado. Atiéndelo con prioridad."
+    if qualified:
+        system_instruction += (
+            "\n\nSTATUS: CLIENTE CUALIFICADO (VIP). "
+            "Este cliente ya fue validado. Atiéndelo con prioridad."
+        )
 
     if not messages or not isinstance(messages[0], SystemMessage):
         mensajes_entrada = [SystemMessage(content=system_instruction)] + messages
     else:
         mensajes_entrada = list(messages)
         mensajes_entrada[0] = SystemMessage(content=system_instruction)
-    
+
     result = react_agent.invoke({"messages": mensajes_entrada})
-    
     new_messages = result.get("messages", [])
-    
-    response_messages = []
-    for msg in new_messages:
-        if msg not in mensajes_entrada:
-            response_messages.append(msg)
-    
+
+    response_messages = [msg for msg in new_messages if msg not in mensajes_entrada]
     return {"messages": response_messages}
 
 
-def update_points_node(state: AgentState) -> dict:
-    """
-    Detecta cierre de conversación.
-    Sistema de puntos deshabilitado temporalmente.
-    """
-    messages = state.get("messages", [])
-    conversation_closed = state.get("conversation_closed", False)
-    
-    for msg in reversed(messages):
-        if not isinstance(msg, ToolMessage):
-            break
-        
-        if msg.name == "finalizar_conversacion":
-            logger.info("🛑 Detectada herramienta finalizar_conversacion: Cerrando permanentemente.")
-            conversation_closed = True
-            break
-
-    updates = {}
-    current_closed = state.get("conversation_closed", False)
-    
-    if conversation_closed != current_closed:
-        updates["conversation_closed"] = conversation_closed
-        
-    return updates
-
-def route_after_update_points(state: AgentState) -> str:
-    """Enruta después de update_points. Siempre termina."""
+def route_after_conversation(state: AgentState) -> str:
+    """El turno termina tras conversation y vuelve a verification en el siguiente input."""
+    _ = state
     return "end"

@@ -1,13 +1,9 @@
-from typing import Annotated, List, Optional
+"""Estado compartido del agente."""
+
+from typing import Annotated, Any, Optional
 from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
-
-
-class QualificationThreshold:
-    """Placeholder - Sistema de calificación deshabilitado temporalmente."""
-    INTERESTED = 4
-    QUALIFIED = 7
 
 
 class AgentState(TypedDict):
@@ -17,21 +13,15 @@ class AgentState(TypedDict):
 
     # Estado base del lead
     is_customer: bool
-    interested: bool
-    qualified: bool
-    qualification_stage: str  # new | discovery | interested | qualified | disqualified
+    qualification_snapshot: Optional[dict[str, Any]]
 
-    # Datos comerciales
-    budgetMin: Optional[int]
-    budgetMax: Optional[int]
-    preferredZones: Optional[List[str]]
-    transactionType: Optional[str]
-    type_of_client: Optional[str]
-    property_type: str  # cesion_remate | npl | reo_sin_posesion | inmueble_libre | inmueble_ocupado | unknown
+    # Mirrors transicionales (derivados del snapshot)
+    interested: Optional[bool]
+    qualified: Optional[bool]
+    qualification_stage: Optional[str]
 
-    # Evidencia de cualificación
-    intent_type: str  # investor | buyer | unknown
-    understands_asset_conditions: Optional[bool]
-    funding_mode: str  # cash_total | mortgage_preapproved | mortgage_unstudied | unknown
-    asset_is_financeable: Optional[bool]
-    asked_mortgage_for_financeable: Optional[bool]
+
+
+
+
+
