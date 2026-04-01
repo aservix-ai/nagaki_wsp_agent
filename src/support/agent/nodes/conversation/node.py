@@ -1,6 +1,6 @@
 import logging
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 from langchain.agents import create_agent
 
 from src.support.agent.state import AgentState
@@ -35,10 +35,22 @@ react_agent = create_agent(llm, tools=tools)
 
 
 def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Filtra mensajes vacíos/corruptos para evitar errores de invocación."""
+    """Filtra mensajes técnicos/corruptos antes de reenviarlos al modelo.
+
+    El checkpointer persiste mensajes de herramientas, pero OpenAI rechaza
+    historiales con ``tool`` huérfanos si ya no vienen precedidos por el
+    ``assistant`` que originó los ``tool_calls``. Para nuevos turnos solo
+    reenviamos memoria conversacional útil.
+    """
     out: list[BaseMessage] = []
     for msg in messages:
         if msg is None:
+            continue
+        if isinstance(msg, ToolMessage):
+            continue
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            # El tool call ya fue resuelto en un turno anterior; conservarlo en
+            # checkpoint no implica reenviarlo al modelo en el siguiente turno.
             continue
         content = getattr(msg, "content", None)
         if content is None:
