@@ -6,6 +6,7 @@ import json
 import os
 import httpx
 import logging
+import unicodedata
 from typing import Optional, List
 from collections import deque
 import threading
@@ -14,6 +15,30 @@ from datetime import datetime
 import pytz
 
 logger = logging.getLogger(__name__)
+MAX_VISIBLE_RESULTS = 3
+
+_CESION_REMATE_KEYWORDS = (
+    "venta de credito",
+    "subasta",
+    "cesion de remate",
+)
+
+_OCUPADA_KEYWORDS = (
+    "ocupada",
+    "vivienda ocupada",
+)
+
+_ASSET_CLASS_ES = {
+    "cesion_remate": "cesión de remate",
+    "ocupada": "vivienda ocupada",
+    "libre": "vivienda libre",
+}
+
+_ASSET_CLASS_ES_PLURAL = {
+    "cesion_remate": "cesiones de remate",
+    "ocupada": "viviendas ocupadas",
+    "libre": "viviendas libres",
+}
 
 # ============================================================
 # Inmobigrama API Client
@@ -34,6 +59,127 @@ def _get_inmobigrama_headers() -> dict:
         "X-API-Key": INMOBIGRAMA_API_KEY,
         "Content-Type": "application/json",
         "Accept": "application/json"
+    }
+
+
+def _fix_mojibake(text: str) -> str:
+    """Intenta reparar textos UTF-8 mal interpretados."""
+    current = text
+    for _ in range(2):
+        try:
+            repaired = current.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            break
+        if repaired == current:
+            break
+        if repaired.count("Ã") + repaired.count("Â") >= current.count("Ã") + current.count("Â"):
+            break
+        current = repaired
+    return current
+
+
+def _normalize_text_for_matching(text: str) -> str:
+    fixed = _fix_mojibake(text or "")
+    lowered = " ".join(fixed.split()).lower()
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", lowered)
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
+def _classify_property_by_description(description: str) -> str:
+    normalized = _normalize_text_for_matching(description)
+    if any(keyword in normalized for keyword in _CESION_REMATE_KEYWORDS):
+        return "cesion_remate"
+    if any(keyword in normalized for keyword in _OCUPADA_KEYWORDS):
+        return "ocupada"
+    return "libre"
+
+
+def _format_option_refs(indices: list[int]) -> str:
+    if len(indices) == 1:
+        return f"la opción {indices[0]}"
+    if len(indices) == 2:
+        return f"las opciones {indices[0]} y {indices[1]}"
+    refs = ", ".join(str(i) for i in indices[:-1])
+    return f"las opciones {refs} y {indices[-1]}"
+
+
+def _build_asset_type_summary(properties: list[dict]) -> str:
+    if not properties:
+        return ""
+
+    grouped: dict[str, list[int]] = {
+        "cesion_remate": [],
+        "ocupada": [],
+        "libre": [],
+    }
+    for idx, prop in enumerate(properties, 1):
+        asset_class = prop.get("asset_class", "libre")
+        grouped.setdefault(asset_class, []).append(idx)
+
+    non_empty_groups = [(asset_class, indices) for asset_class, indices in grouped.items() if indices]
+    if len(non_empty_groups) == 1:
+        only_class, _ = non_empty_groups[0]
+        return (
+            "Como contexto importante, todas las opciones que te compartí son "
+            f"{_ASSET_CLASS_ES_PLURAL.get(only_class, 'viviendas libres')}."
+        )
+
+    parts = []
+    for asset_class, indices in non_empty_groups:
+        refs = _format_option_refs(indices)
+        is_plural = len(indices) > 1
+        label = (
+            _ASSET_CLASS_ES_PLURAL.get(asset_class, "viviendas libres")
+            if is_plural
+            else _ASSET_CLASS_ES.get(asset_class, "vivienda libre")
+        )
+        verb = "son" if is_plural else "es"
+        parts.append(f"{refs} {verb} {label}")
+    return "Como contexto importante sobre el tipo de activo: " + "; ".join(parts) + "."
+
+
+def _normalize_property(item: dict) -> dict:
+    operation = item.get("operation") or {}
+    pricing = operation.get("pricing") or {}
+    location = item.get("location") or {}
+    area = item.get("area") or {}
+    features = item.get("features") or {}
+    descriptions = item.get("descriptions") or {}
+
+    description_text = ""
+    if isinstance(descriptions, dict):
+        description_text = descriptions.get("es") or descriptions.get("en") or ""
+    elif isinstance(descriptions, str):
+        description_text = descriptions
+    if not description_text:
+        description_text = item.get("description", "") or ""
+
+    return {
+        "reference": item.get("reference"),
+        "property_type": item.get("propertyType"),
+        "city": location.get("city"),
+        "province": location.get("province"),
+        "zone": location.get("zone"),
+        "price": pricing.get("price"),
+        "price_period": pricing.get("pricePeriod"),
+        "operation_type": operation.get("operationType"),
+        "area_m2": area.get("area"),
+        "plot_area": area.get("plotArea"),
+        "bedrooms": features.get("bedrooms"),
+        "bathrooms": features.get("bathrooms"),
+        "condition": features.get("condition"),
+        "elevator": features.get("elevator"),
+        "garage": features.get("garage"),
+        "pool": features.get("pool"),
+        "terrace": features.get("terrace"),
+        "garden": features.get("garden"),
+        "air_conditioning": features.get("airConditioning"),
+        "heating": features.get("heating"),
+        "storage": features.get("storageRoom"),
+        "description": description_text,
+        "asset_class": _classify_property_by_description(description_text),
     }
 
 
@@ -296,28 +442,26 @@ def consultar_inmuebles(
             filtros_str = ", ".join(filtros) if filtros else "los criterios especificados"
             return f"No se encontraron inmuebles con {filtros_str}. Puedes intentar ampliar los criterios de búsqueda."
         
-        limite = min(limite, 10)
+        limite = min(limite, MAX_VISIBLE_RESULTS)
         properties = properties[:limite]
-        
+        normalized_properties = [_normalize_property(prop) for prop in properties]
+
         response_parts = []
         
-        for i, prop in enumerate(properties, 1):
+        for i, prop in enumerate(normalized_properties, 1):
             ref = prop.get("reference", "N/A")
-            prop_type = prop.get("propertyType", "inmueble")
+            prop_type = prop.get("property_type", "inmueble")
             
-            location = prop.get("location", {})
-            city = location.get("city", "")
-            province = location.get("province", "")
-            zone = location.get("zone", "")
+            city = prop.get("city", "")
+            province = prop.get("province", "")
+            zone = prop.get("zone", "")
             ubicacion = city if city else province
             if zone:
                 ubicacion = f"{zone}, {ubicacion}"
             
-            operation = prop.get("operation", {})
-            op_type = operation.get("operationType", "")
-            pricing = operation.get("pricing", {})
-            price = pricing.get("price", 0)
-            period = pricing.get("pricePeriod", "")
+            op_type = prop.get("operation_type", "")
+            price = prop.get("price", 0)
+            period = prop.get("price_period", "")
             
             op_text = "en venta" if op_type == "sell" else "en alquiler" if op_type == "rent" else "en traspaso"
             price_text = f"{price:,}€".replace(",", ".")
@@ -326,22 +470,20 @@ def consultar_inmuebles(
             elif period == "day":
                 price_text += "/día"
             
-            area_data = prop.get("area", {})
-            area = area_data.get("area", 0)
-            plot_area = area_data.get("plotArea", 0)
+            area = prop.get("area_m2", 0)
+            plot_area = prop.get("plot_area", 0)
             
-            features = prop.get("features", {})
-            bedrooms = features.get("bedrooms", 0)
-            bathrooms = features.get("bathrooms", 0)
-            elevator = features.get("elevator", False)
-            pool = features.get("pool", "")
-            terrace = features.get("terrace", False)
-            garden = features.get("garden", False)
-            garage = features.get("garage", False)
-            air_conditioning = features.get("airConditioning", "")
-            heating = features.get("heating", "")
-            storage = features.get("storageRoom", False)
-            condition = features.get("condition", "")
+            bedrooms = prop.get("bedrooms", 0)
+            bathrooms = prop.get("bathrooms", 0)
+            elevator = prop.get("elevator", False)
+            pool = prop.get("pool", "")
+            terrace = prop.get("terrace", False)
+            garden = prop.get("garden", False)
+            garage = prop.get("garage", False)
+            air_conditioning = prop.get("air_conditioning", "")
+            heating = prop.get("heating", "")
+            storage = prop.get("storage", False)
+            condition = prop.get("condition", "")
             
             description = prop.get("description", "")
             if description and len(description) > 200:
@@ -355,6 +497,7 @@ def consultar_inmuebles(
                 "room": "habitación", "villa": "villa", "bungalow": "bungalow"
             }
             tipo_es = tipo_map.get(prop_type, prop_type)
+            asset_class_es = _ASSET_CLASS_ES.get(prop.get("asset_class", "libre"), "vivienda libre")
             
             condition_map = {
                 "new": "a estrenar",
@@ -409,9 +552,15 @@ def consultar_inmuebles(
             
             if description:
                 prop_text += f"{description}\n"
+
+            prop_text += f"Tipo de activo detectado por descripción: {asset_class_es}\n"
             
             response_parts.append(prop_text)
         
+        asset_summary = _build_asset_type_summary(normalized_properties)
+        if asset_summary:
+            response_parts.append(asset_summary)
+
         if total > limite:
             response_parts.append(f"Tengo {total - limite} opciones más si te interesa ver otras.")
         
@@ -453,46 +602,47 @@ def buscar_inmueble_por_referencia(referencia: str) -> str:
         if not prop:
             return f"No encontré ningún inmueble con la referencia '{referencia}'. Verifica que el código sea correcto."
         
+        normalized = _normalize_property(prop)
+
         ref = prop.get("reference", referencia)
-        prop_type = prop.get("propertyType", "inmueble")
+        prop_type = normalized.get("property_type", "inmueble")
         
         location = prop.get("location", {})
-        city = location.get("city", "")
-        province = location.get("province", "")
-        zone = location.get("zone", "")
+        city = normalized.get("city", "")
+        province = normalized.get("province", "")
+        zone = normalized.get("zone", "")
         street = location.get("street", "")
         floor = location.get("floor", "")
         
         operation = prop.get("operation", {})
-        op_type = operation.get("operationType", "")
+        op_type = normalized.get("operation_type", "")
         pricing = operation.get("pricing", {})
-        price = pricing.get("price", 0)
+        price = normalized.get("price", 0)
         original_price = pricing.get("originalPrice", 0)
-        period = pricing.get("pricePeriod", "")
+        period = normalized.get("price_period", "")
         
         area_data = prop.get("area", {})
-        area = area_data.get("area", 0)
+        area = normalized.get("area_m2", 0)
         usable_area = area_data.get("usableArea", 0)
-        plot_area = area_data.get("plotArea", 0)
+        plot_area = normalized.get("plot_area", 0)
         
         features = prop.get("features", {})
-        bedrooms = features.get("bedrooms", 0)
-        bathrooms = features.get("bathrooms", 0)
+        bedrooms = normalized.get("bedrooms", 0)
+        bathrooms = normalized.get("bathrooms", 0)
         toilets = features.get("toilets", 0)
-        elevator = features.get("elevator", False)
-        condition = features.get("condition", "")
+        elevator = normalized.get("elevator", False)
+        condition = normalized.get("condition", "")
         furnished = features.get("furnished", False)
-        air_conditioning = features.get("airConditioning", "")
-        heating = features.get("heating", "")
-        pool = features.get("pool", "")
+        air_conditioning = normalized.get("air_conditioning", "")
+        heating = normalized.get("heating", "")
+        pool = normalized.get("pool", "")
         garage = features.get("garages", 0)
-        storage = features.get("storageRoom", False)
+        storage = normalized.get("storage", False)
         terrace = features.get("numberOfTerraces", 0)
-        garden = features.get("garden", False)
+        garden = normalized.get("garden", False)
         community_fees = features.get("communityFees", 0)
         
-        descriptions = prop.get("descriptions", {})
-        desc_es = descriptions.get("es", "") if descriptions else ""
+        desc_es = normalized.get("description", "")
         if not desc_es:
             desc_es = prop.get("description", "")
         
@@ -585,6 +735,11 @@ def buscar_inmueble_por_referencia(referencia: str) -> str:
         if desc_es:
             desc_short = desc_es[:400] + "..." if len(desc_es) > 400 else desc_es
             response += f"\n{desc_short}\n"
+
+        response += (
+            f"\nClasificación por descripción: "
+            f"{_ASSET_CLASS_ES.get(normalized.get('asset_class', 'libre'), 'vivienda libre')}\n"
+        )
         
         return response
         
