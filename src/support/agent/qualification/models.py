@@ -9,4 +9,3 @@ class QualificationResult:
     stage: str
     missing_interested: List[str] = field(default_factory=list)
     missing_qualified: List[str] = field(default_factory=list)
-
