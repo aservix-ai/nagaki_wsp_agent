@@ -18,7 +18,10 @@ import platform
 from datetime import datetime, timezone
 from typing import Any
 
-from src.support.agent.lead_sync import trigger_lead_sync
+from src.support.agent.lead_sync import (
+    trigger_lead_sync,
+    trigger_qualified_admin_notification,
+)
 from src.support.agent.qualification.evaluator import (
     evaluate_qualification,
     extract_evidence_from_conversation,
@@ -126,6 +129,15 @@ async def _process_event(
             idempotency_key=idempotency_key,
         )
         logger.info("Lead sync triggered for %s -> %s", thread_id, result.stage)
+        if result.stage == "qualified":
+            admin_notification_key = f"{thread_id}:qualified_admin:v{turn_id}"
+            trigger_qualified_admin_notification(
+                state=new_snapshot,
+                thread_id=thread_id,
+                stage=result.stage,
+                idempotency_key=admin_notification_key,
+            )
+            logger.info("Qualified admin notification triggered for %s", thread_id)
 
 
 async def run_qualification_worker() -> None:

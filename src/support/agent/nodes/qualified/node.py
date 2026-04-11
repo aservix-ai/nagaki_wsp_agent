@@ -1,51 +1,70 @@
+"""
+Nodo de cliente cualificado para WhatsApp.
+
+Genera una respuesta corta y natural basada en el historial y en el snapshot
+de calificación, sin volver a abrir un flujo de herramientas.
+"""
+
 import logging
+
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage
-from langgraph.prebuilt import create_react_agent
+from langchain_core.runnables import RunnableConfig
 
 from src.support.agent.state import AgentState
-from src.support.agent.nodes.conversation.tools import consultar_inmuebles, listar_ubicaciones_disponibles
 
 logger = logging.getLogger(__name__)
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, max_tokens=300)
-tools = [consultar_inmuebles, listar_ubicaciones_disponibles]
-react_agent = create_react_agent(llm, tools)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, max_tokens=220)
 
-QUALIFIED_SYSTEM_PROMPT = """Eres Laura, de Grupo Nagaki.
-El cliente ha sido CUALIFICADO exitosamente (tiene interés real y capacidad).
-Tu objetivo es derivarlo al equipo comercial de forma amable y profesional.
+QUALIFIED_SYSTEM_PROMPT = """Eres Laura, asesora inmobiliaria de Grupo Nagaki, hablando por WhatsApp.
 
-Instrucciones:
-   - Agradécele cortésmente por su interés
-   - Infórmale que será remitido a un asesor especializado
-   - Asegúrale que recibirá un contacto pronto
-   - Despídete de forma cálida
+El cliente YA quedó cualificado. No vuelvas a hacer preguntas de calificación.
+
+Tu objetivo en esta fase es:
+1. Responder de forma breve y natural.
+2. Confirmar el siguiente paso comercial cuando corresponda.
+3. Si el cliente acepta seguir, decirle que un asesor lo contactará lo antes posible.
+
+Reglas:
+- Responde en tono humano y cercano.
+- Sin emojis, sin markdown, sin listas.
+- No repitas información técnica innecesaria.
+- No abras búsquedas nuevas salvo que el cliente lo pida claramente.
+- No inventes datos.
 """
 
 
-def qualified_node(state: AgentState) -> dict:
-    """
-    Maneja clientes cualificados usando React Agent.
-    """
+def qualified_node(state: AgentState, config: RunnableConfig | None = None) -> dict:
     messages = state.get("messages", [])
-    
-    logger.info("QUALIFIED NODE - Cliente cualificado")
-    
-    mensajes_entrada = [SystemMessage(content=QUALIFIED_SYSTEM_PROMPT)] + messages[-5:]
-    
-    result = react_agent.invoke({"messages": mensajes_entrada})
-    
-    new_messages = result.get("messages", [])
-    response_messages = [msg for msg in new_messages if msg not in mensajes_entrada]
-    
-    return {"messages": response_messages}
+    snapshot = state.get("qualification_snapshot") or {}
 
+    context_parts = []
+    preferred_zones = snapshot.get("preferredZones") or []
+    if preferred_zones:
+        context_parts.append(f"Zonas de interés: {', '.join(preferred_zones)}")
+    if snapshot.get("budgetMax"):
+        context_parts.append(f"Presupuesto máximo: {snapshot.get('budgetMax')} euros")
+    if snapshot.get("property_type"):
+        context_parts.append(f"Tipo de inmueble: {snapshot.get('property_type')}")
+    if snapshot.get("funding_mode"):
+        context_parts.append(f"Financiación: {snapshot.get('funding_mode')}")
+    if snapshot.get("intent_type"):
+        context_parts.append(f"Intención: {snapshot.get('intent_type')}")
 
-def should_continue_qualified(state: AgentState) -> str:
-    """React Agent maneja herramientas internamente, siempre termina."""
-    return "end"
+    context_info = "\n".join(context_parts) if context_parts else "Sin datos adicionales"
+    system_prompt = f"{QUALIFIED_SYSTEM_PROMPT}\n\nContexto útil del cliente:\n{context_info}"
 
+    logger.info("=" * 60)
+    logger.info("🏆 QUALIFIED NODE - Cliente Cualificado")
+    logger.info("=" * 60)
+    logger.info("Qualification stage: %s", snapshot.get("qualification_stage", "qualified"))
+    logger.info("Tipo de propiedad: %s", snapshot.get("property_type", "unknown"))
+    logger.info("Mensajes en historial: %s", len(messages))
+    logger.info("=" * 60)
 
+    input_messages = [SystemMessage(content=system_prompt), *messages]
+    response = llm.invoke(input_messages)
 
-
+    logger.info("💬 Qualified response: %s...", str(response.content)[:80])
+    return {"messages": [response]}

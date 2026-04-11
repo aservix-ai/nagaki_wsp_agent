@@ -43,6 +43,7 @@ from src.support.agent.qualification import (
     load_qualification_snapshot,
     publish_qualification_event,
 )
+from src.support.agent.qualification.snapshot_utils import pick_fresher_snapshot
 from src.support.agent.qualification.store import next_turn_id
 
 # Importar nuevas utilidades
@@ -224,7 +225,10 @@ async def process_whatsapp_task(
 
             prev_snapshot = prev_state.get("qualification_snapshot")
             if isinstance(prev_snapshot, dict):
-                qualification_snapshot = prev_snapshot
+                qualification_snapshot = pick_fresher_snapshot(
+                    qualification_snapshot,
+                    prev_snapshot,
+                ) or qualification_snapshot
             
             # 4. Construir estado inicial y configurar thread
             messages_before = prev_state.get("messages", [])
@@ -1015,9 +1019,13 @@ def extract_last_ai_response(messages: list) -> Optional[str]:
     
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
-            content = msg.content
+            content = _message_text(getattr(msg, "content", ""))
             # Verificar que tenga contenido válido y no sea solo JSON
-            if content and content.strip() and not content.strip().startswith("{"):
+            if content and not content.startswith("{"):
+                return content
+        if isinstance(msg, ToolMessage):
+            content = _message_text(getattr(msg, "content", ""))
+            if content:
                 return content
     return None
 

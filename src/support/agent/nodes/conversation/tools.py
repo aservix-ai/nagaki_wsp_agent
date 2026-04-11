@@ -121,9 +121,19 @@ def _build_asset_type_summary(properties: list[dict]) -> str:
     non_empty_groups = [(asset_class, indices) for asset_class, indices in grouped.items() if indices]
     if len(non_empty_groups) == 1:
         only_class, _ = non_empty_groups[0]
+        if only_class == "libre":
+            return (
+                "Y un detalle importante: todas las opciones que te compartí son viviendas libres, "
+                "así que se pueden visitar y avanzar por una compra normal."
+            )
+        if only_class == "ocupada":
+            return (
+                "Y un detalle importante: todas las opciones son viviendas ocupadas, "
+                "así que no se pueden visitar ni financiar con hipoteca tradicional."
+            )
         return (
-            "Como contexto importante, todas las opciones que te compartí son "
-            f"{_ASSET_CLASS_ES_PLURAL.get(only_class, 'viviendas libres')}."
+            "Y un detalle importante: todas las opciones son cesiones de remate, "
+            "así que requieren liquidez y un proceso jurídico posterior."
         )
 
     parts = []
@@ -137,7 +147,7 @@ def _build_asset_type_summary(properties: list[dict]) -> str:
         )
         verb = "son" if is_plural else "es"
         parts.append(f"{refs} {verb} {label}")
-    return "Como contexto importante sobre el tipo de activo: " + "; ".join(parts) + "."
+    return "Y como contexto importante sobre el tipo de activo, " + "; ".join(parts) + "."
 
 
 def _normalize_property(item: dict) -> dict:
@@ -497,8 +507,6 @@ def consultar_inmuebles(
                 "room": "habitación", "villa": "villa", "bungalow": "bungalow"
             }
             tipo_es = tipo_map.get(prop_type, prop_type)
-            asset_class_es = _ASSET_CLASS_ES.get(prop.get("asset_class", "libre"), "vivienda libre")
-            
             condition_map = {
                 "new": "a estrenar",
                 "good": "buen estado",
@@ -553,8 +561,6 @@ def consultar_inmuebles(
             if description:
                 prop_text += f"{description}\n"
 
-            prop_text += f"Tipo de activo detectado por descripción: {asset_class_es}\n"
-            
             response_parts.append(prop_text)
         
         asset_summary = _build_asset_type_summary(normalized_properties)
@@ -736,10 +742,22 @@ def buscar_inmueble_por_referencia(referencia: str) -> str:
             desc_short = desc_es[:400] + "..." if len(desc_es) > 400 else desc_es
             response += f"\n{desc_short}\n"
 
-        response += (
-            f"\nClasificación por descripción: "
-            f"{_ASSET_CLASS_ES.get(normalized.get('asset_class', 'libre'), 'vivienda libre')}\n"
-        )
+        asset_class = normalized.get("asset_class", "libre")
+        if asset_class == "libre":
+            response += (
+                "\nDetalle importante: es una vivienda libre, así que se puede visitar "
+                "y encaja mejor en una compra tradicional.\n"
+            )
+        elif asset_class == "ocupada":
+            response += (
+                "\nDetalle importante: es una vivienda ocupada, así que no se puede visitar "
+                "ni financiar con hipoteca tradicional.\n"
+            )
+        else:
+            response += (
+                "\nDetalle importante: es una cesión de remate, así que requiere liquidez "
+                "y un proceso jurídico posterior.\n"
+            )
         
         return response
         
