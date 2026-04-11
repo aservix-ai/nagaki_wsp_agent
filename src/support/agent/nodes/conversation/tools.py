@@ -6,6 +6,7 @@ import json
 import os
 import httpx
 import logging
+import re
 import unicodedata
 from typing import Optional, List
 from collections import deque
@@ -38,6 +39,24 @@ _ASSET_CLASS_ES_PLURAL = {
     "cesion_remate": "cesiones de remate",
     "ocupada": "viviendas ocupadas",
     "libre": "viviendas libres",
+}
+
+_PROPERTY_TYPE_LABELS = {
+    "flat": "piso",
+    "apartment": "apartamento",
+    "house": "casa",
+    "chalet": "chalet",
+    "duplex": "dúplex",
+    "penthouse": "ático",
+    "studio": "estudio",
+    "office": "oficina",
+    "commercial_space": "local comercial",
+    "garage": "garaje",
+    "land": "terreno",
+    "industrial_warehouse": "nave",
+    "room": "habitación",
+    "villa": "villa",
+    "bungalow": "bungalow",
 }
 
 # ============================================================
@@ -148,6 +167,63 @@ def _build_asset_type_summary(properties: list[dict]) -> str:
         verb = "son" if is_plural else "es"
         parts.append(f"{refs} {verb} {label}")
     return "Y como contexto importante sobre el tipo de activo, " + "; ".join(parts) + "."
+
+
+def _property_type_label(property_type: str | None) -> str:
+    return _PROPERTY_TYPE_LABELS.get(property_type or "", property_type or "inmueble")
+
+
+def _format_price(price: int | float | None, period: str | None = None) -> str:
+    if not price:
+        return "precio a consultar"
+
+    price_value = f"{int(price):,}".replace(",", ".")
+    suffix = ""
+    if period == "month":
+        suffix = " al mes"
+    elif period == "day":
+        suffix = " al día"
+    return f"{price_value} euros{suffix}"
+
+
+def _format_surface(area: int | float | None, plot_area: int | float | None = None) -> str:
+    if area:
+        return f"{int(area)} m2"
+    if plot_area:
+        return f"{int(plot_area)} m2"
+    return "superficie no indicada"
+
+
+def _format_location(zone: str | None, city: str | None, province: str | None) -> str:
+    parts = [part for part in [zone, city or province] if part]
+    if province and city and province != city:
+        parts.append(province)
+    return ", ".join(parts) if parts else "ubicación no indicada"
+
+
+def _summarize_description(description: str, max_sentences: int = 2, max_chars: int = 260) -> str:
+    cleaned = " ".join(_fix_mojibake(description or "").split())
+    if not cleaned:
+        return ""
+
+    cleaned = re.sub(r"^\W+", "", cleaned)
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+    if not sentences:
+        sentences = [cleaned]
+
+    summary_parts: list[str] = []
+    for sentence in sentences:
+        candidate = " ".join(summary_parts + [sentence]).strip()
+        if len(candidate) > max_chars and summary_parts:
+            break
+        summary_parts.append(sentence)
+        if len(summary_parts) >= max_sentences:
+            break
+
+    summary = " ".join(summary_parts).strip()
+    if len(summary) > max_chars:
+        summary = summary[:max_chars].rsplit(" ", 1)[0].rstrip(",.;:") + "..."
+    return summary
 
 
 def _normalize_property(item: dict) -> dict:
@@ -331,10 +407,33 @@ def buscar_info_viviendas(query: str) -> str:
     Returns:
         Información encontrada en la knowledge base
     """
-    _ = query
+    normalized = _normalize_text_for_matching(query)
+
+    if any(token in normalized for token in ("cesion", "remate", "subasta")):
+        return (
+            "Una cesión de remate suele ser una oportunidad para comprar por debajo de mercado, "
+            "pero requiere paciencia. Viene de una subasta dentro de un proceso judicial, "
+            "normalmente hace falta abogado y procurador para terminarlo, suele requerir pago al contado "
+            "y por lo general no se puede visitar el interior."
+        )
+
+    if "ocupad" in normalized:
+        return (
+            "Una vivienda ocupada puede tener un precio atractivo, pero hay que asumir más incertidumbre. "
+            "Normalmente no se puede visitar, no suele encajar con hipoteca tradicional "
+            "y conviene valorar bien los tiempos antes de comprar."
+        )
+
+    if "libre" in normalized or "visitable" in normalized:
+        return (
+            "Una vivienda libre encaja mejor en una compra tradicional. "
+            "Normalmente se puede visitar y, si el perfil financiero lo permite, "
+            "también es la opción más compatible con financiación."
+        )
+
     return (
-        "La base documental de viviendas no está disponible ahora mismo. "
-        "Puedo ayudarte con búsqueda de inmuebles concretos por zona, precio y tipo."
+        "Puedo orientarte con viviendas libres, ocupadas o cesiones de remate. "
+        "Si quieres, dime qué tipo te interesa y te lo explico de forma sencilla."
     )
 
 
@@ -460,108 +559,17 @@ def consultar_inmuebles(
         
         for i, prop in enumerate(normalized_properties, 1):
             ref = prop.get("reference", "N/A")
-            prop_type = prop.get("property_type", "inmueble")
-            
-            city = prop.get("city", "")
-            province = prop.get("province", "")
-            zone = prop.get("zone", "")
-            ubicacion = city if city else province
-            if zone:
-                ubicacion = f"{zone}, {ubicacion}"
-            
-            op_type = prop.get("operation_type", "")
-            price = prop.get("price", 0)
-            period = prop.get("price_period", "")
-            
-            op_text = "en venta" if op_type == "sell" else "en alquiler" if op_type == "rent" else "en traspaso"
-            price_text = f"{price:,}€".replace(",", ".")
-            if period == "month":
-                price_text += "/mes"
-            elif period == "day":
-                price_text += "/día"
-            
-            area = prop.get("area_m2", 0)
-            plot_area = prop.get("plot_area", 0)
-            
-            bedrooms = prop.get("bedrooms", 0)
-            bathrooms = prop.get("bathrooms", 0)
-            elevator = prop.get("elevator", False)
-            pool = prop.get("pool", "")
-            terrace = prop.get("terrace", False)
-            garden = prop.get("garden", False)
-            garage = prop.get("garage", False)
-            air_conditioning = prop.get("air_conditioning", "")
-            heating = prop.get("heating", "")
-            storage = prop.get("storage", False)
-            condition = prop.get("condition", "")
-            
-            description = prop.get("description", "")
-            if description and len(description) > 200:
-                description = description[:200].rsplit(" ", 1)[0] + "..."
-            
-            tipo_map = {
-                "flat": "piso", "apartment": "apartamento", "house": "casa",
-                "chalet": "chalet", "duplex": "dúplex", "penthouse": "ático",
-                "studio": "estudio", "office": "oficina", "commercial_space": "local comercial",
-                "garage": "garaje", "land": "terreno", "industrial_warehouse": "nave",
-                "room": "habitación", "villa": "villa", "bungalow": "bungalow"
-            }
-            tipo_es = tipo_map.get(prop_type, prop_type)
-            condition_map = {
-                "new": "a estrenar",
-                "good": "buen estado",
-                "to_renovate": "para reformar",
-                "renovated": "reformado"
-            }
-            estado = condition_map.get(condition, "")
-            
-            extras = []
-            if pool and pool not in ["no", "false", False, None, ""]:
-                pool_type = "piscina comunitaria" if pool == "communitary" else "piscina"
-                extras.append(pool_type)
-            if terrace and terrace not in ["no", "false", False, None, ""]:
-                extras.append("terraza")
-            if garden and garden not in ["no", "false", False, None, ""]:
-                extras.append("jardín")
-            if garage and garage not in ["no", "false", False, None, "", 0]:
-                extras.append("garaje")
-            if elevator and elevator not in ["no", "false", False, None, ""]:
-                extras.append("ascensor")
-            if air_conditioning and air_conditioning not in ["no", "not_specified", "false", False, None, ""]:
-                extras.append("aire acondicionado")
-            if heating and heating not in ["no", "not_specified", "false", False, None, ""]:
-                extras.append("calefacción")
-            if storage and storage not in ["no", "false", False, None, ""]:
-                extras.append("trastero")
-            
-            prop_text = f"{i}. {tipo_es.capitalize()} en {ubicacion}\n"
-            prop_text += f"Ref: {ref}\n"
-            prop_text += f"Precio: {price_text} {op_text}\n"
-            
-            specs_parts = []
-            if area:
-                specs_parts.append(f"{area}m²")
-            if bedrooms:
-                hab_text = "habitación" if bedrooms == 1 else "habitaciones"
-                specs_parts.append(f"{bedrooms} {hab_text}")
-            if bathrooms:
-                bath_text = "baño" if bathrooms == 1 else "baños"
-                specs_parts.append(f"{bathrooms} {bath_text}")
-            if plot_area and plot_area != area:
-                specs_parts.append(f"parcela de {plot_area}m²")
-            if estado:
-                specs_parts.append(estado)
-            
-            if specs_parts:
-                prop_text += f"{', '.join(specs_parts)}\n"
-            
-            if extras:
-                prop_text += f"Tiene: {', '.join(extras)}\n"
-            
-            if description:
-                prop_text += f"{description}\n"
+            tipo_es = _property_type_label(prop.get("property_type"))
+            ubicacion = _format_location(prop.get("zone"), prop.get("city"), prop.get("province"))
+            price_text = _format_price(prop.get("price"), prop.get("price_period"))
+            surface_text = _format_surface(prop.get("area_m2"), prop.get("plot_area"))
 
-            response_parts.append(prop_text)
+            response_parts.append(
+                f"{i}. {tipo_es.capitalize()} en {ubicacion}. "
+                f"Precio: {price_text}. "
+                f"Superficie: {surface_text}. "
+                f"Ref: {ref}."
+            )
         
         asset_summary = _build_asset_type_summary(normalized_properties)
         if asset_summary:
@@ -611,155 +619,39 @@ def buscar_inmueble_por_referencia(referencia: str) -> str:
         normalized = _normalize_property(prop)
 
         ref = prop.get("reference", referencia)
-        prop_type = normalized.get("property_type", "inmueble")
-        
-        location = prop.get("location", {})
-        city = normalized.get("city", "")
-        province = normalized.get("province", "")
-        zone = normalized.get("zone", "")
-        street = location.get("street", "")
-        floor = location.get("floor", "")
-        
-        operation = prop.get("operation", {})
-        op_type = normalized.get("operation_type", "")
-        pricing = operation.get("pricing", {})
-        price = normalized.get("price", 0)
-        original_price = pricing.get("originalPrice", 0)
-        period = normalized.get("price_period", "")
-        
-        area_data = prop.get("area", {})
-        area = normalized.get("area_m2", 0)
-        usable_area = area_data.get("usableArea", 0)
-        plot_area = normalized.get("plot_area", 0)
-        
-        features = prop.get("features", {})
-        bedrooms = normalized.get("bedrooms", 0)
-        bathrooms = normalized.get("bathrooms", 0)
-        toilets = features.get("toilets", 0)
-        elevator = normalized.get("elevator", False)
-        condition = normalized.get("condition", "")
-        furnished = features.get("furnished", False)
-        air_conditioning = normalized.get("air_conditioning", "")
-        heating = normalized.get("heating", "")
-        pool = normalized.get("pool", "")
-        garage = features.get("garages", 0)
-        storage = normalized.get("storage", False)
-        terrace = features.get("numberOfTerraces", 0)
-        garden = normalized.get("garden", False)
-        community_fees = features.get("communityFees", 0)
-        
-        desc_es = normalized.get("description", "")
-        if not desc_es:
-            desc_es = prop.get("description", "")
-        
-        tipo_map = {
-            "flat": "piso", "apartment": "apartamento", "house": "casa",
-            "chalet": "chalet", "duplex": "dúplex", "penthouse": "ático",
-            "studio": "estudio", "office": "oficina", "commercial_space": "local comercial",
-            "garage": "garaje", "land": "terreno", "industrial_warehouse": "nave industrial",
-            "room": "habitación", "villa": "villa", "bungalow": "bungalow"
-        }
-        tipo_es = tipo_map.get(prop_type, prop_type)
-        
-        condition_map = {
-            "new": "nuevo", "good": "buen estado", "renovated": "reformado",
-            "semi_renovated": "semi-reformado", "to_renovate": "para reformar",
-            "original_state": "estado original"
-        }
-        condition_es = condition_map.get(condition, "")
-        
-        op_text = "en venta" if op_type == "sell" else "en alquiler" if op_type == "rent" else "en traspaso"
-        price_text = f"{price:,}€".replace(",", ".")
-        if period == "month":
-            price_text += "/mes"
-        
-        ubicacion = city
-        if zone:
-            ubicacion = f"{zone}, {city}"
-        if province and province != city:
-            ubicacion += f", {province}"
-        
-        response = f"{tipo_es.capitalize()} en {ubicacion}\n"
-        response += f"Referencia: {ref}\n"
-        response += f"Precio: {price_text} {op_text}\n"
-        if original_price and original_price != price:
-            orig_text = f"{original_price:,}€".replace(",", ".")
-            response += f"Precio original: {orig_text}\n"
-        
-        response += f"\nSuperficie: {area}m²"
-        if usable_area and usable_area != area:
-            response += f" ({usable_area}m² útiles)"
-        response += "\n"
-        if plot_area and plot_area != area:
-            response += f"Parcela: {plot_area}m²\n"
-        
-        if bedrooms:
-            hab_text = "habitación" if bedrooms == 1 else "habitaciones"
-            response += f"{bedrooms} {hab_text}\n"
-        if bathrooms:
-            bath_text = "baño" if bathrooms == 1 else "baños"
-            response += f"{bathrooms} {bath_text}\n"
-        if toilets:
-            response += f"{toilets} aseo(s)\n"
-        
-        extras = []
-        if elevator and elevator not in ["no", "false", False, None, ""]:
-            extras.append("ascensor")
-        if furnished and furnished not in ["no", "false", False, None, ""]:
-            extras.append("amueblado")
-        if air_conditioning and air_conditioning not in ["not_specified", "no", "false", False, None, ""]:
-            extras.append("aire acondicionado")
-        if heating and heating not in ["not_specified", "no", "false", False, None, ""]:
-            extras.append("calefacción")
-        if pool and pool not in ["no", "false", False, None, ""]:
-            pool_text = "piscina comunitaria" if pool == "communitary" else "piscina"
-            extras.append(pool_text)
-        if garage and garage not in [0, "0", "no", "false", False, None, ""]:
-            extras.append(f"{garage} plaza(s) de garaje")
-        if storage and storage not in ["no", "false", False, None, ""]:
-            extras.append("trastero")
-        if terrace and terrace not in [0, "0", "no", "false", False, None, ""]:
-            extras.append(f"{terrace} terraza(s)")
-        if garden and garden not in ["no", "false", False, None, ""]:
-            extras.append("jardín")
-        
-        if extras:
-            response += f"\nCaracterísticas: {', '.join(extras)}\n"
-        
-        if condition_es:
-            response += f"Estado: {condition_es}\n"
-        
-        if community_fees:
-            response += f"Gastos comunidad: {community_fees}€/mes\n"
-        
-        if street:
-            response += f"\nUbicación: {street}"
-            if floor:
-                response += f", planta {floor}"
-            response += "\n"
-        
-        if desc_es:
-            desc_short = desc_es[:400] + "..." if len(desc_es) > 400 else desc_es
-            response += f"\n{desc_short}\n"
+        tipo_es = _property_type_label(normalized.get("property_type"))
+        ubicacion = _format_location(normalized.get("zone"), normalized.get("city"), normalized.get("province"))
+        price_text = _format_price(normalized.get("price"), normalized.get("price_period"))
+        surface_text = _format_surface(normalized.get("area_m2"), normalized.get("plot_area"))
+
+        desc_es = normalized.get("description", "") or prop.get("description", "")
+        desc_summary = _summarize_description(desc_es)
+
+        response_parts = [
+            f"{tipo_es.capitalize()} en {ubicacion}.",
+            f"Referencia: {ref}.",
+            f"Precio: {price_text}.",
+            f"Superficie: {surface_text}.",
+        ]
+
+        if desc_summary:
+            response_parts.append(f"Resumen: {desc_summary}")
 
         asset_class = normalized.get("asset_class", "libre")
         if asset_class == "libre":
-            response += (
-                "\nDetalle importante: es una vivienda libre, así que se puede visitar "
-                "y encaja mejor en una compra tradicional.\n"
+            response_parts.append(
+                "Detalle importante: es una vivienda libre, así que encaja mejor en una compra tradicional y normalmente se puede visitar."
             )
         elif asset_class == "ocupada":
-            response += (
-                "\nDetalle importante: es una vivienda ocupada, así que no se puede visitar "
-                "ni financiar con hipoteca tradicional.\n"
+            response_parts.append(
+                "Detalle importante: es una vivienda ocupada, así que normalmente no se puede visitar ni financiar con hipoteca tradicional."
             )
         else:
-            response += (
-                "\nDetalle importante: es una cesión de remate, así que requiere liquidez "
-                "y un proceso jurídico posterior.\n"
+            response_parts.append(
+                "Detalle importante: es una cesión de remate, así que suele requerir liquidez y más paciencia con los tiempos."
             )
-        
-        return response
+
+        return "\n".join(response_parts)
         
     except httpx.HTTPStatusError as e:
         logger.error(f"Error HTTP al buscar inmueble: {e}")
